@@ -1,0 +1,457 @@
+//use std::result;
+
+enum JSONvalue{
+    Object(Vec<(String, JSONvalue)>),
+    Array(Vec<JSONvalue>),
+    Str(String),
+    Number(f64),
+    Bool(bool),
+    Null,
+}
+
+enum Token {
+    LeftBrace,
+    RightBrace,
+    LeftBracket,
+    RightBracket,
+    Colon,
+    Comma,
+    StringToken(String),
+    NumberToken(f64),
+    True,
+    False,
+    Null,
+}
+
+
+struct Lexer{
+    input: Vec<u8>,
+    pos: usize,
+}
+
+impl Lexer {
+    fn new(str: &str) -> Lexer{
+        Lexer { 
+            input: str.as_bytes().to_vec(), 
+            pos: 0,
+        }
+    }
+
+    fn current(&self) -> Option<u8>{
+        if self.pos < self.input.len(){
+            Some(self.input[self.pos])
+        }
+        else {
+            None
+        }
+    }
+
+    fn advance(&mut self){
+        self.pos += 1;
+    }
+
+    // fn peek(&self) ->Option<u8>{
+    //     if self.pos < self.input.len(){
+    //         Some(self.input[self.pos + 1])
+    //     }
+    //     else {
+    //         None
+    //     }
+    // }
+
+    fn read_keyword(&mut self, keyword: &str){
+        for expected in keyword.as_bytes(){
+            match self.current() {
+                Some(c) if c == *expected => self.advance(),
+                Some(c) => panic!(
+                    "Unexpected character '{}' while reading keyword '{}'",
+                    c as char, keyword
+                ), 
+                None => panic!("Unexpected end of input while reading keyword '{}'", keyword),                
+            }
+        }
+    }
+
+    fn read_string(&mut self) -> String{
+        self.advance(); //consume opening "
+
+        let mut result = String::new();
+
+        loop{
+            match self.current(){
+                None => panic!("Unterminated String"),
+
+                Some(b'"') => {
+                    self.advance(); // consume clsoing "
+                    return result;
+                }
+
+                Some(b'\\') => {
+                    self.advance();
+
+                    match self.current() {
+                        Some(b'"')  => { result.push('"');  self.advance(); }
+                        Some(b'\\') => { result.push('\\'); self.advance(); }
+                        Some(b'/')  => { result.push('/');  self.advance(); }
+                        Some(b'n')  => { result.push('\n'); self.advance(); }
+                        Some(b't')  => { result.push('\t'); self.advance(); }
+                        Some(b'r')  => { result.push('\r'); self.advance(); }
+                        Some(b'b')  => { result.push('\x08'); self.advance(); }
+                        Some(b'f')  => { result.push('\x0C'); self.advance(); }
+                        
+                        Some(b'u') => {
+                            self.advance(); // consume 'u'
+
+                            let codepoint = self.read_unicode_escape();
+
+                            let ch = char::from_u32(codepoint).unwrap_or_else(|| panic!("Invaild unicode codepoint {}", codepoint));
+
+                            result.push(ch);
+                        }
+                        Some(c) => panic!("Invalid escape sequence: \\{}", c as char),
+                        None    => panic!("Unterminated escape sequence"),
+                    }
+                }
+
+                Some(c) => {
+                    result.push(c as char);
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    fn read_unicode_escape(&mut self) -> u32{
+
+       let mut value: u32 = 0;
+
+       for _ in 0..4 {
+            match self.current(){
+                Some(c) => {
+                    let digit = match c {
+                        b'0'..b'9' => (c - b'0') as u32,
+                        b'a'..=b'f' => (c - b'a' + 10) as u32,
+                        b'A'..=b'F' => (c - b'A' + 10) as u32,
+
+                        _ => panic!("Invaild hex digit in unicode {}", c as char),
+                    };
+
+                    value = value * 16 + digit;
+                    self.advance();
+                }        
+                None => panic!("Unterminated unicode escape."),
+            }
+       } 
+       value
+    }
+
+    fn read_number(&mut self) -> f64 {
+        let mut s = String::new();
+
+        // optional minus sign
+        if let Some(b'-') = self.current() {
+            s.push('-');
+            self.advance();
+        }
+
+        // integer part
+        loop {
+            match self.current() {
+                Some(c @ b'0'..=b'9') => {
+                    s.push(c as char);
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+
+        // optional decimal part
+        if let Some(b'.') = self.current() {
+            s.push('.');
+            self.advance();
+
+            loop {
+                match self.current() {
+                    Some(c @ b'0'..=b'9') => {
+                        s.push(c as char);
+                        self.advance();
+                    }
+                    _ => break,
+                }
+            }
+        }
+
+        s.parse::<f64>().unwrap_or_else(|_| panic!("Invalid number: {}", s))
+    }
+
+}
+
+
+
+struct Parser{
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser{
+    fn new(tokens: Vec<Token>) -> Parser{
+        Parser{ tokens, pos: 0 }
+    }
+
+    fn current(&self) -> &Token {
+        if self.pos < self.tokens.len() {
+            &self.tokens[self.pos]
+        }
+        else{
+            panic!("Unexpected end of token stream");
+        }
+    }
+
+    fn advance(&mut self) {
+        self.pos += 1;
+    }
+
+    fn expect(&mut self, description: &str) -> &Token{
+        if self.pos < self.tokens.len(){
+            let token = &self.tokens[self.pos];
+            self.pos += 1;
+            token
+        }
+        else {
+            panic!("Expected {} but reached end of input", description);
+        }
+    }
+
+    //The Core parse_value: It looks at the current token and dispatches to the appropriate parsing logic
+    fn parse_value(&mut self) -> JSONvalue{
+        match self.current(){
+         Token::LeftBrace => self.parse_object(),   
+         Token::LeftBracket => self.parse_array(),
+         Token::True => { self.advance(); JSONvalue::Bool(true) },
+         Token::False => { self.advance(); JSONvalue::Bool(false) },
+         Token::Null => { self.advance(); JSONvalue::Null },
+
+         Token::NumberToken(n) => {
+            let value = *n;
+            self.advance();
+
+            JSONvalue::Number(value)
+         }
+
+         Token::StringToken(s) => {
+            let value = s.clone();
+            self.advance();
+
+            JSONvalue::Str(value)
+         }
+
+         Token::RightBrace   => panic!("Unexpected '}}'"),
+         Token::RightBracket => panic!("Unexpected ']'"),
+         Token::Colon        => panic!("Unexpected ':'"),
+         Token::Comma        => panic!("Unexpected ','"),
+
+        }
+    }
+
+    fn parse_object(&mut self) -> JSONvalue{
+        self.advance();
+
+        let mut pairs: Vec<(String, JSONvalue)> = Vec::new();
+
+        if let Token::RightBrace = self.current(){
+            self.advance();
+            return JSONvalue::Object(pairs);
+        }
+
+        loop{
+            let key = match self.expect("object key") {
+                Token::StringToken(s) => s.clone(),
+                _other => panic!("Expected string key, got something else"),
+            };
+
+            match self.expect("colon") {
+                Token::Colon => {},
+                _ => panic!("Expected ':' after object key"),
+            };
+
+            let value = self.parse_value();
+
+            pairs.push((key, value));
+
+            match self.current() {
+                Token::Comma => {
+                    self.advance();
+                }
+
+                Token::RightBrace => {
+                    self.advance();
+                    break;
+                }
+
+                _ => panic!("Expected ',' or '}}' in object"),
+            };
+        }
+        JSONvalue::Object(pairs)
+    }
+
+    fn parse_array(&mut self) -> JSONvalue {
+        self.advance();
+
+        let mut elements: Vec<JSONvalue> = Vec::new();
+
+        if let Token::RightBracket = self.current() {
+            self.advance();
+            return JSONvalue::Array(elements);
+        }
+
+        loop {
+            let element = self.parse_value();
+            elements.push(element);
+
+            match self.current() {
+                Token::Comma => {
+                    self.advance();
+                }
+
+                Token::RightBracket => {
+                    self.advance();
+                    break;
+                }
+
+                _ => panic!("Expected ',' or ']' in array"),
+            };
+        }
+
+        JSONvalue::Array(elements)
+    }
+}
+
+//Stage 1: tokenizer
+fn tokenize(input: &str) ->Vec<Token>{
+    let mut lexer = Lexer::new(input);
+    let mut tokens = Vec::new();
+
+    loop{
+        match lexer.current() {
+            None => break,
+
+            Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => {
+                lexer.advance();
+            }
+
+            Some(b'{') => { tokens.push(Token::LeftBrace); lexer.advance(); }
+            Some(b'}') => { tokens.push(Token::RightBrace); lexer.advance(); }
+            Some(b'[') => { tokens.push(Token::LeftBracket); lexer.advance(); }
+            Some(b']') => { tokens.push(Token::RightBracket); lexer.advance(); }
+            Some(b':') => { tokens.push(Token::Colon); lexer.advance(); }
+            Some(b',') => { tokens.push(Token::Comma); lexer.advance(); }
+
+            Some(b'"') => {
+                let s = lexer.read_string();
+                tokens.push(Token::StringToken(s));
+            }
+
+            Some(b't') => {
+                lexer.read_keyword("true");
+                tokens.push(Token::True);
+            }
+            Some(b'f') => {
+                lexer.read_keyword("false");
+                tokens.push(Token::False);
+            }
+            Some(b'n') => {
+                lexer.read_keyword("null");
+                tokens.push(Token::Null);
+            }
+
+            Some(b'-') | Some(b'0'..=b'9')=>{
+                let n = lexer.read_number();
+                tokens.push(Token::NumberToken(n));
+            }
+
+            Some(c) => {
+                panic!("Unexpected character: {}", c as char);
+            }
+
+        }
+    }
+
+    // return tokens
+    tokens
+}
+
+//Stage 2: parser
+fn parse(tokens: Vec<Token>) ->JSONvalue{
+    let mut parser = Parser::new(tokens);
+    let value = parser.parse_value();
+
+    value
+}
+
+fn display(value: &JSONvalue) -> String{
+    match value{
+        JSONvalue::Null        => String::from("null"),
+        JSONvalue::Bool(true)  => String::from("true"),
+        JSONvalue::Bool(false) => String::from("false"),
+        JSONvalue::Number(n)   => format!("{}", n),
+        JSONvalue::Str(s)      => format!("\"{}\"", s),
+
+        JSONvalue::Array(elements) =>{
+            let mut result = String::from("[");
+            let mut first = true;
+
+            for element in elements{
+                if !first {
+                    result.push_str(", ");
+                }
+
+                result.push_str(&display(element));
+                first = false;
+            }
+
+            result.push(']');
+            result
+        }
+
+        JSONvalue::Object(pairs) => {
+            let mut result = String::from("{");
+            let mut first = true;
+            for (key, value) in pairs {
+                if !first {
+                    result.push_str(", ");
+                }
+                result.push_str(&format!("\"{}\": {}", key, display(value)));
+                first = false;
+            }
+            result.push('}');
+            result
+        }
+
+    }
+
+}
+
+
+fn main(){
+    let tests = vec![
+        r#"null"#,
+        r#"true"#,
+        r#"42"#,
+        r#"-3.14"#,
+        r#""hello world""#,
+        r#"[]"#,
+        r#"{}"#,
+        r#"[1, 2, 3]"#,
+        r#"{"name": "alice", "age": 30, "active": true}"#,
+        r#"{"scores": [95, 87, 100], "info": {"city": "delhi", "zip": null}}"#,
+        r#"["hello\nworld", "tab\there", "\u0041\u0042\u0043"]"#,
+    ];
+
+    for input in &tests {
+        let tokens = tokenize(input);
+        let value = parse(tokens);
+        println!("Input:  {}", input);
+        println!("Output: {}", display(&value));
+        println!();
+    }
+}
